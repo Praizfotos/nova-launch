@@ -1,12 +1,13 @@
 import { Router, Request, Response } from "express";
 import webhookService from "../services/webhookService";
 import webhookDeliveryService from "../services/webhookDeliveryService";
+import webhookDeadLetterService from "../services/webhookDeadLetterService";
 import {
   validateSubscriptionCreate,
   validateSubscriptionId,
   validateListSubscriptions,
 } from "../middleware/validation";
-import { webhookRateLimiter } from "../middleware/rateLimiter";
+import { webhookRateLimiter, webhookUserRateLimiter } from "../middleware/rateLimiter";
 
 const router = Router();
 
@@ -16,6 +17,7 @@ const router = Router();
  */
 router.post(
   "/subscribe",
+  webhookUserRateLimiter,
   webhookRateLimiter,
   validateSubscriptionCreate,
   async (req: Request, res: Response) => {
@@ -45,6 +47,7 @@ router.post(
  */
 router.delete(
   "/unsubscribe/:id",
+  webhookUserRateLimiter,
   webhookRateLimiter,
   validateSubscriptionId,
   async (req: Request, res: Response) => {
@@ -167,6 +170,7 @@ router.get(
  */
 router.patch(
   "/:id/toggle",
+  webhookUserRateLimiter,
   webhookRateLimiter,
   validateSubscriptionId,
   async (req: Request, res: Response) => {
@@ -266,6 +270,130 @@ router.post(
       res.status(500).json({
         success: false,
         error: "Failed to test webhook",
+      });
+    }
+  }
+);
+
+/**
+ * GET /api/webhooks/:id/dead-letters
+ * List dead-lettered deliveries for a subscription
+ */
+router.get(
+  "/:id/dead-letters",
+  validateSubscriptionId,
+  async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const limit = parseInt(req.query.limit as string) || 50;
+
+      const subscription = await webhookService.getSubscription(id);
+      if (!subscription) {
+        return res.status(404).json({
+          success: false,
+          error: "Subscription not found",
+        });
+      }
+
+      const deadLetters = await webhookDeadLetterService.listUnresolved(id, limit);
+
+      res.json({
+        success: true,
+        data: deadLetters,
+        count: deadLetters.length,
+      });
+    } catch (error) {
+      console.error("Error fetching dead letters:", error);
+      res.status(500).json({
+        success: false,
+        error: "Failed to fetch dead-letter deliveries",
+      });
+    }
+  }
+);
+
+/**
+ * POST /api/webhooks/dead-letters/:id/retry
+ * Retry a dead-lettered delivery
+ */
+router.post(
+  "/dead-letters/:id/retry",
+  webhookRateLimiter,
+  async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const deadLetter = await webhookDeadLetterService.getEntry(id);
+
+      if (!deadLetter) {
+        return res.status(404).json({
+          success: false,
+          error: "Dead-letter entry not found",
+        });
+      }
+
+      const subscription = await webhookService.getSubscription(deadLetter.subscriptionId);
+      if (!subscription) {
+        return res.status(404).json({
+          success: false,
+          error: "Associated subscription not found",
+        });
+      }
+
+      // Re-deliver the webhook
+      const payload = JSON.parse(deadLetter.payload);
+      await webhookDeliveryService.deliverWebhook(
+        subscription,
+        deadLetter.event,
+        payload.data || payload,
+        `retry_${id}`
+      );
+
+      // Mark as resolved
+      await webhookDeadLetterService.markResolved(id, "retried");
+
+      res.json({
+        success: true,
+        message: "Dead-letter delivery retried successfully",
+      });
+    } catch (error) {
+      console.error("Error retrying dead letter:", error);
+      res.status(500).json({
+        success: false,
+        error: "Failed to retry dead-letter delivery",
+      });
+    }
+  }
+);
+
+/**
+ * POST /api/webhooks/dead-letters/:id/skip
+ * Skip/archive a dead-lettered delivery
+ */
+router.post(
+  "/dead-letters/:id/skip",
+  async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const deadLetter = await webhookDeadLetterService.getEntry(id);
+
+      if (!deadLetter) {
+        return res.status(404).json({
+          success: false,
+          error: "Dead-letter entry not found",
+        });
+      }
+
+      await webhookDeadLetterService.markResolved(id, "skipped");
+
+      res.json({
+        success: true,
+        message: "Dead-letter delivery archived",
+      });
+    } catch (error) {
+      console.error("Error skipping dead letter:", error);
+      res.status(500).json({
+        success: false,
+        error: "Failed to archive dead-letter delivery",
       });
     }
   }

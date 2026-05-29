@@ -40,14 +40,14 @@ mod tests {
     ) -> Result<Address, crate::types::Error> {
         let client = crate::TokenFactoryClient::new(env, contract_id);
         let params = crate::types::TokenCreationParams {
-            name: String::from_str(env, "CapToken"),
-            symbol: String::from_str(env, "CAP"),
+            name: soroban_sdk::String::from_str(env, "CapToken"),
+            symbol: soroban_sdk::String::from_str(env, "CAP"),
             decimals: 7,
             initial_supply,
             max_supply,
             metadata_uri: None,
         };
-        let addresses = client.try_set_metadata(
+        let addresses = client.try_batch_create_tokens(
             creator,
             &soroban_sdk::vec![env, params],
             &70_000_000_i128,

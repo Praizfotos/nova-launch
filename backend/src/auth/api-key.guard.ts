@@ -3,24 +3,55 @@ import {
   CanActivate,
   ExecutionContext,
   UnauthorizedException,
+  ForbiddenException,
   Logger,
+  SetMetadata,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { Reflector } from "@nestjs/core";
 import * as crypto from "crypto";
+
+export const REQUIRED_SCOPES = "required_scopes";
+
+export interface ApiKeyConfig {
+  key: string;
+  scopes: string[];
+}
 
 @Injectable()
 export class ApiKeyGuard implements CanActivate {
   private readonly logger = new Logger(ApiKeyGuard.name);
-  private readonly validApiKeys: Set<string>;
+  private readonly apiKeys: Map<string, ApiKeyConfig> = new Map();
 
-  constructor(private readonly configService: ConfigService) {
-    const raw = this.configService.get<string>("API_KEYS", "");
-    this.validApiKeys = new Set(
-      raw
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly reflector: Reflector
+  ) {
+    this.loadApiKeys();
+  }
+
+  private loadApiKeys(): void {
+    const raw = this.configService.get<string>("API_KEYS_CONFIG", "");
+    if (!raw) return;
+
+    try {
+      const config = JSON.parse(raw) as ApiKeyConfig[];
+      config.forEach((cfg) => {
+        if (cfg.key) {
+          this.apiKeys.set(cfg.key, cfg);
+        }
+      });
+    } catch (e) {
+      this.logger.warn("Failed to parse API_KEYS_CONFIG, using legacy mode");
+      const legacyRaw = this.configService.get<string>("API_KEYS", "");
+      legacyRaw
         .split(",")
         .map((k) => k.trim())
         .filter(Boolean)
-    );
+        .forEach((key) => {
+          this.apiKeys.set(key, { key, scopes: [] });
+        });
+    }
   }
 
   canActivate(context: ExecutionContext): boolean {
@@ -31,22 +62,52 @@ export class ApiKeyGuard implements CanActivate {
       throw new UnauthorizedException("API key is required");
     }
 
-    // Constant-time comparison to prevent timing attacks
-    const isValid = [...this.validApiKeys].some((key) =>
-      this.safeCompare(apiKey as string, key)
-    );
-
-    if (!isValid) {
+    const keyConfig = this.findKeyConfig(apiKey as string);
+    if (!keyConfig) {
       this.logger.warn(`Invalid API key attempt from ${request.ip}`);
       throw new UnauthorizedException("Invalid API key");
     }
 
+    const requiredScopes = this.reflector.get<string[]>(
+      REQUIRED_SCOPES,
+      context.getHandler()
+    );
+
+    if (requiredScopes && requiredScopes.length > 0) {
+      const hasRequiredScope = requiredScopes.some((scope) =>
+        keyConfig.scopes.includes(scope)
+      );
+
+      if (!hasRequiredScope) {
+        this.logger.warn(
+          `API key lacks required scope(s) ${requiredScopes.join(",")} from ${request.ip}`
+        );
+        throw new ForbiddenException(
+          `API key lacks required scope(s): ${requiredScopes.join(",")}`
+        );
+      }
+    }
+
     request.apiKey = apiKey;
+    request.apiKeyScopes = keyConfig.scopes;
     return true;
+  }
+
+  private findKeyConfig(apiKey: string): ApiKeyConfig | null {
+    for (const [key, config] of this.apiKeys) {
+      if (this.safeCompare(apiKey, key)) {
+        return config;
+      }
+    }
+    return null;
   }
 
   private safeCompare(a: string, b: string): boolean {
     if (a.length !== b.length) return false;
     return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
   }
+}
+
+export function RequireScopes(...scopes: string[]) {
+  return SetMetadata(REQUIRED_SCOPES, scopes);
 }

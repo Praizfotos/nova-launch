@@ -74,6 +74,12 @@ export class Database {
     return auditLog;
   }
 
+  static async purgeAuditLogs(olderThan: Date): Promise<number> {
+    const before = this.auditLogs.length;
+    this.auditLogs = this.auditLogs.filter((l) => l.timestamp >= olderThan);
+    return before - this.auditLogs.length;
+  }
+
   static async getAuditLogs(filters?: {
     adminId?: string;
     action?: string;

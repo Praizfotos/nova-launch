@@ -340,7 +340,8 @@ model Campaign {
   cancelledAt    DateTime?
   pausedAt       DateTime?
 
-  executions CampaignExecution[]
+  executions     CampaignExecution[]
+  auditTrail     CampaignAuditTrail[]
 
   @@index([tokenId])
   @@index([creator])
@@ -364,6 +365,22 @@ model CampaignExecution {
   @@index([campaignId])
   @@index([executor])
   @@index([executedAt])
+}
+
+model CampaignAuditTrail {
+  id           String         @id @default(uuid())
+  campaignId   String
+  fromStatus   CampaignStatus
+  toStatus     CampaignStatus
+  actor        String
+  txHash       String?
+  transitionAt DateTime       @default(now())
+
+  campaign Campaign @relation(fields: [campaignId], references: [id])
+
+  @@index([campaignId])
+  @@index([actor])
+  @@index([transitionAt])
 }
 
 enum CampaignType {

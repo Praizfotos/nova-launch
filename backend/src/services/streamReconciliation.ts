@@ -1,0 +1,195 @@
+import { PrismaClient, StreamStatus } from "@prisma/client";
+import { Logger } from "@nestjs/common";
+
+export interface StreamDivergence {
+  streamId: number;
+  creator: string;
+  recipient: string;
+  projectedBalance: string;
+  onChainBalance: string;
+  divergenceType: "mismatch" | "missing_onchain" | "missing_projected";
+  severity: "error" | "warning";
+  timestamp: Date;
+}
+
+export interface StreamReconciliationResult {
+  totalStreams: number;
+  streamsChecked: number;
+  divergences: StreamDivergence[];
+  errors: string[];
+  reconciliationTime: number;
+  timestamp: Date;
+}
+
+export class StreamReconciliationService {
+  private readonly logger = new Logger(StreamReconciliationService.name);
+  private prisma: PrismaClient;
+  private reconciliationIntervalMs: number;
+  private lastReconciliation?: Date;
+
+  constructor(
+    prisma: PrismaClient,
+    reconciliationIntervalMs: number = parseInt(
+      process.env.STREAM_RECONCILIATION_INTERVAL_MS || "3600000"
+    ) // 1 hour default
+  ) {
+    this.prisma = prisma;
+    this.reconciliationIntervalMs = reconciliationIntervalMs;
+  }
+
+  async reconcile(): Promise<StreamReconciliationResult> {
+    const startTime = Date.now();
+    this.logger.debug("Starting stream settlement reconciliation");
+
+    const divergences: StreamDivergence[] = [];
+    const errors: string[] = [];
+
+    try {
+      const streams = await this.prisma.stream.findMany({
+        where: {
+          status: { in: [StreamStatus.CREATED, StreamStatus.CLAIMED] },
+        },
+        select: {
+          streamId: true,
+          creator: true,
+          recipient: true,
+          amount: true,
+          claimedAt: true,
+          status: true,
+        },
+      });
+
+      const totalStreams = streams.length;
+      let streamsChecked = 0;
+
+      for (const stream of streams) {
+        try {
+          streamsChecked++;
+
+          const projectedBalance = this.calculateProjectedBalance(stream);
+          const onChainBalance = await this.fetchOnChainBalance(stream.streamId);
+
+          if (
+            onChainBalance !== null &&
+            projectedBalance !== onChainBalance.toString()
+          ) {
+            divergences.push({
+              streamId: stream.streamId,
+              creator: stream.creator,
+              recipient: stream.recipient,
+              projectedBalance,
+              onChainBalance: onChainBalance.toString(),
+              divergenceType: "mismatch",
+              severity: "error",
+              timestamp: new Date(),
+            });
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          errors.push(`Stream ${stream.streamId} check failed: ${msg}`);
+        }
+      }
+
+      this.lastReconciliation = new Date();
+
+      if (divergences.length > 0) {
+        this.logger.warn(
+          `Found ${divergences.length} stream divergences during reconciliation`
+        );
+      }
+
+      return {
+        totalStreams,
+        streamsChecked,
+        divergences,
+        errors,
+        reconciliationTime: Date.now() - startTime,
+        timestamp: new Date(),
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Reconciliation failed: ${msg}`);
+      errors.push(`Reconciliation failed: ${msg}`);
+
+      return {
+        totalStreams: 0,
+        streamsChecked: 0,
+        divergences,
+        errors,
+        reconciliationTime: Date.now() - startTime,
+        timestamp: new Date(),
+      };
+    }
+  }
+
+  private calculateProjectedBalance(stream: any): string {
+    if (stream.status === StreamStatus.CLAIMED) {
+      return "0";
+    }
+    return stream.amount.toString();
+  }
+
+  private async fetchOnChainBalance(streamId: number): Promise<bigint | null> {
+    try {
+      // This would call the on-chain contract via Web3/blockchain API
+      // For now, this is a placeholder that would be implemented with actual chain integration
+      // In production, this would call a blockchain RPC or contract query
+      return BigInt(0);
+    } catch (err) {
+      this.logger.warn(`Failed to fetch on-chain balance for stream ${streamId}`);
+      return null;
+    }
+  }
+
+  getLastReconciliationTime(): Date | undefined {
+    return this.lastReconciliation;
+  }
+
+  shouldReconcile(): boolean {
+    if (!this.lastReconciliation) return true;
+    return (
+      Date.now() - this.lastReconciliation.getTime() >=
+      this.reconciliationIntervalMs
+    );
+  }
+
+  formatResults(result: StreamReconciliationResult): string {
+    const lines: string[] = [];
+    lines.push("═══════════════════════════════════════════════════════");
+    lines.push("  Stream Settlement Reconciliation Results");
+    lines.push("═══════════════════════════════════════════════════════");
+    lines.push(`  Timestamp:        ${result.timestamp.toISOString()}`);
+    lines.push(`  Duration:         ${result.reconciliationTime}ms`);
+    lines.push(`  Total Streams:    ${result.totalStreams}`);
+    lines.push(`  Checked:          ${result.streamsChecked}`);
+    lines.push(`  Divergences:      ${result.divergences.length}`);
+    lines.push(`  Errors:           ${result.errors.length}`);
+    lines.push("───────────────────────────────────────────────────────");
+
+    if (result.errors.length > 0) {
+      lines.push("  ERRORS:");
+      result.errors.forEach((err) => {
+        lines.push(`    ⚠ ${err}`);
+      });
+      lines.push("");
+    }
+
+    if (result.divergences.length > 0) {
+      lines.push("  DIVERGENCES:");
+      result.divergences.forEach((div) => {
+        lines.push(`    ❌ Stream ${div.streamId}`);
+        lines.push(`       Projected: ${div.projectedBalance}`);
+        lines.push(`       On-chain:  ${div.onChainBalance}`);
+      });
+    } else {
+      lines.push("  ✅ All streams reconciled successfully");
+    }
+
+    lines.push("═══════════════════════════════════════════════════════");
+    return lines.join("\n");
+  }
+}
+
+export const streamReconciliationService = new StreamReconciliationService(
+  new PrismaClient()
+);

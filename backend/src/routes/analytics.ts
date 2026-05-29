@@ -11,6 +11,7 @@ import { Router, Request, Response } from "express";
 import { Database } from "../config/database";
 import { authenticateAdmin } from "../middleware/auth";
 import { successResponse, errorResponse } from "../utils/response";
+import { CursorPagination } from "../lib/pagination";
 
 const router = Router();
 
@@ -205,6 +206,118 @@ router.get(
       console.error("[analytics] users error:", err);
       return res.status(500).json(
         errorResponse({ code: "ANALYTICS_ERROR", message: "Failed to fetch user analytics" })
+      );
+    }
+  }
+);
+
+/**
+ * GET /api/analytics/tokens/list
+ * Paginated token list ordered deterministically by createdAt DESC, id ASC.
+ * Accepts ?cursor=<encoded>&limit=<n> query params.
+ */
+router.get(
+  "/tokens/list",
+  authenticateAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const rawCursor = req.query.cursor as string | undefined;
+      const rawLimit = req.query.limit ? Number(req.query.limit) : undefined;
+
+      if (rawLimit !== undefined && (isNaN(rawLimit) || rawLimit < 1)) {
+        return res.status(400).json(
+          errorResponse({ code: "INVALID_PARAMETERS", message: "limit must be a positive integer" })
+        );
+      }
+
+      const tokens = await Database.getAllTokens(false);
+
+      // Deterministic ordering: newest first, tie-break on id ascending
+      const sorted = [...tokens].sort((a, b) => {
+        const timeDiff = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+        if (timeDiff !== 0) return timeDiff;
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+      });
+
+      const result = CursorPagination.paginate(sorted, {
+        cursor: rawCursor,
+        limit: rawLimit,
+      });
+
+      return res.json(
+        successResponse({
+          items: result.items,
+          nextCursor: result.nextCursor ?? null,
+          prevCursor: result.prevCursor ?? null,
+          hasNextPage: result.hasMore,
+          total: result.total,
+        })
+      );
+    } catch (err: any) {
+      if (err?.message === "Cursor not found" || err?.message === "Invalid cursor") {
+        return res.status(400).json(
+          errorResponse({ code: "INVALID_PARAMETERS", message: "Invalid pagination cursor" })
+        );
+      }
+      console.error("[analytics] tokens/list error:", err);
+      return res.status(500).json(
+        errorResponse({ code: "ANALYTICS_ERROR", message: "Failed to fetch token list" })
+      );
+    }
+  }
+);
+
+/**
+ * GET /api/analytics/users/list
+ * Paginated user list ordered deterministically by createdAt DESC, id ASC.
+ * Accepts ?cursor=<encoded>&limit=<n> query params.
+ */
+router.get(
+  "/users/list",
+  authenticateAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const rawCursor = req.query.cursor as string | undefined;
+      const rawLimit = req.query.limit ? Number(req.query.limit) : undefined;
+
+      if (rawLimit !== undefined && (isNaN(rawLimit) || rawLimit < 1)) {
+        return res.status(400).json(
+          errorResponse({ code: "INVALID_PARAMETERS", message: "limit must be a positive integer" })
+        );
+      }
+
+      const users = await Database.getAllUsers();
+
+      // Deterministic ordering: newest first, tie-break on id ascending
+      const sorted = [...users].sort((a, b) => {
+        const timeDiff = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+        if (timeDiff !== 0) return timeDiff;
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+      });
+
+      const result = CursorPagination.paginate(sorted, {
+        cursor: rawCursor,
+        limit: rawLimit,
+      });
+
+      return res.json(
+        successResponse({
+          items: result.items,
+          nextCursor: result.nextCursor ?? null,
+          prevCursor: result.prevCursor ?? null,
+          hasNextPage: result.hasMore,
+          total: result.total,
+        })
+      );
+    } catch (err: any) {
+      if (err?.message === "Cursor not found" || err?.message === "Invalid cursor") {
+        return res.status(400).json(
+          errorResponse({ code: "INVALID_PARAMETERS", message: "Invalid pagination cursor" })
+        );
+      }
+      console.error("[analytics] users/list error:", err);
+      return res.status(500).json(
+        errorResponse({ code: "ANALYTICS_ERROR", message: "Failed to fetch user list" })
       );
     }
   }

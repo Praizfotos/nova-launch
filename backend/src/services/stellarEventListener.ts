@@ -10,12 +10,11 @@ import { EventCursorStore } from "./eventCursorStore";
 import { StreamEventParser } from "./streamEventParser";
 import { parseVaultCreatedEvent, parseVaultClaimedEvent, parseVaultCancelledEvent, parseVaultMetadataUpdatedEvent } from "./vaultEventParser";
 import { decodeEvent, kindForTopic } from "./eventVersioning/decoderRegistry";
-import { 
-  BACKGROUND_RETRY_CONFIG,
-  calculateBackoffDelay,
+import {
   isRetryableError,
   sleep
 } from "../stellar-service-integration/rate-limiter";
+import { ListenerBackoffState, LISTENER_RECONNECT_CONFIG } from "./listenerBackoff";
 import { IntegrationMetrics } from "../monitoring/metrics/prometheus-config";
 import {
   PROJECTION_LAG_THRESHOLDS,
@@ -30,12 +29,21 @@ const _env = validateEnv();
 const HORIZON_URL = _env.STELLAR_HORIZON_URL;
 const FACTORY_CONTRACT_ID = _env.FACTORY_CONTRACT_ID;
 
-const POLL_INTERVAL_MS = 5000; // Poll every 5 seconds
+const POLL_INTERVAL_MS = 5000;
 
-// Global lag tracking windows
-const LAG_WINDOW_SIZE_MS = 60000; // 1 minute rolling window
+const LAG_WINDOW_SIZE_MS = 60000;
 const globalLagWindow = new LagWindow(LAG_WINDOW_SIZE_MS);
 const eventKindLagWindows = new Map<string, LagWindow>();
+
+export interface HorizonTransport {
+  getEvents(url: string, params: any): Promise<{ data: { _embedded?: { records: StellarEvent[] } } }>;
+}
+
+export class DefaultHorizonTransport implements HorizonTransport {
+  async getEvents(url: string, params: any): Promise<any> {
+    return axios.get(url, { params, timeout: 30000 });
+  }
+}
 
 interface StellarEvent {
   type: string;
@@ -59,15 +67,21 @@ export class StellarEventListener {
   private cursorStore: EventCursorStore;
   private streamEventParser: StreamEventParser;
   private recentLagMetrics: ProjectionLagMetrics[] = [];
-  private lastAlertTime: Map<string, number> = new Map(); // Debounce alerts per event kind
-  private alertDebounceMs = 5000; // Don't alert more than once per 5s per event kind
+  private lastAlertTime: Map<string, number> = new Map();
+  private alertDebounceMs = 5000;
+  private transport: HorizonTransport;
 
-  constructor() {
+  constructor(transport?: HorizonTransport) {
     this.prisma = new PrismaClient();
     this.governanceParser = new GovernanceEventParser(this.prisma);
     this.tokenEventParser = new TokenEventParser(this.prisma);
     this.cursorStore = new EventCursorStore(this.prisma);
     this.streamEventParser = new StreamEventParser(this.prisma);
+    this.transport = transport || new DefaultHorizonTransport();
+  }
+
+  setTransport(transport: HorizonTransport): void {
+    this.transport = transport;
   }
 
   /**
@@ -114,53 +128,44 @@ export class StellarEventListener {
   }
 
   /**
-   * Poll for new events
+   * Poll for new events with bounded exponential backoff and jitter on failure.
+   *
+   * Backoff resets after LISTENER_RECONNECT_CONFIG.healthResetThreshold consecutive
+   * successful polls to avoid permanently elevated delays after transient outages.
    */
   private async pollEvents(): Promise<void> {
-    let consecutiveFailures = 0;
-    const maxConsecutiveFailures = 5;
+    const backoff = new ListenerBackoffState(LISTENER_RECONNECT_CONFIG);
 
     while (this.isRunning) {
       try {
         await this.fetchAndProcessEvents();
-        consecutiveFailures = 0; // Reset on success
+        backoff.recordSuccess();
+        await this.delay(POLL_INTERVAL_MS);
       } catch (error) {
-        consecutiveFailures++;
-        
         const isTransient = isRetryableError(error);
-        
+
+        console.warn(
+          `[StellarEventListener] poll error (transient=${isTransient}):`,
+          error instanceof Error ? error.message : String(error),
+        );
+
         if (isTransient) {
-          console.warn(
-            `Transient error polling events (failure ${consecutiveFailures}/${maxConsecutiveFailures}):`,
-            error instanceof Error ? error.message : String(error)
-          );
-          
-          // Use exponential backoff for transient errors
-          const backoffDelay = calculateBackoffDelay(
-            Math.min(consecutiveFailures, BACKGROUND_RETRY_CONFIG.maxAttempts),
-            BACKGROUND_RETRY_CONFIG
-          );
-          
-          console.log(`Backing off for ${Math.round(backoffDelay)}ms before next poll`);
-          await sleep(backoffDelay);
-          
-          // If too many consecutive failures, alert but continue
-          if (consecutiveFailures >= maxConsecutiveFailures) {
+          const { delayMs, attempt } = backoff.recordFailure();
+
+          if (attempt > 5) {
             console.error(
-              `Event listener has failed ${consecutiveFailures} times consecutively. ` +
-              `Continuing with extended backoff.`
+              `[StellarEventListener] ${attempt} consecutive failures — continuing with extended backoff`,
             );
           }
-        } else {
-          // Terminal error - log and continue with normal polling
-          console.error("Terminal error polling events (will continue):", error);
-          consecutiveFailures = 0; // Reset since it's not a transient issue
-        }
-      }
 
-      // Wait before next poll (normal interval or already backed off above)
-      if (consecutiveFailures === 0) {
-        await this.delay(POLL_INTERVAL_MS);
+          IntegrationMetrics.recordEventProcessed('reconnect', 'error');
+          await sleep(delayMs);
+        } else {
+          // Non-transient error: log and resume normal cadence without backoff
+          console.error("[StellarEventListener] non-retryable error (will continue):", error);
+          backoff.recordSuccess();
+          await this.delay(POLL_INTERVAL_MS);
+        }
       }
     }
   }
@@ -180,11 +185,7 @@ export class StellarEventListener {
     }
 
     try {
-      const response = await axios.get(url, { 
-        params,
-        timeout: 30000, // 30 second timeout
-      });
-      
+      const response = await this.transport.getEvents(url, params);
       const events: StellarEvent[] = response.data._embedded?.records || [];
 
       if (events.length === 0) {
@@ -199,18 +200,17 @@ export class StellarEventListener {
         await this.cursorStore.save(this.lastCursor);
       }
     } catch (error) {
-      // Enhance error with context for better retry decisions
       if (axios.isAxiosError(error)) {
         const status = error.response?.status;
         if (status === 429) {
           console.warn("Rate limited by Horizon API (429)");
-          throw error; // Will be retried with backoff
+          throw error;
         } else if (status && status >= 500) {
           console.warn(`Horizon API server error (${status})`);
-          throw error; // Will be retried with backoff
+          throw error;
         } else if (status && status >= 400 && status < 500) {
           console.error(`Horizon API client error (${status}):`, error.message);
-          throw error; // Terminal error, won't retry
+          throw error;
         }
       }
       

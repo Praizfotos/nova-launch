@@ -7,6 +7,7 @@
  * DELETE /api/dividends/pools/:poolId  - Cancel a pool (funder only)
  * POST   /api/dividends/claim          - Claim dividends for a holder
  * GET    /api/dividends/claimable      - Check claimable amount for a holder
+ * GET    /api/dividends/pools/:poolId/consistency - Verify snapshot consistency for admin
  */
 
 import { Router, Request, Response } from "express";
@@ -17,6 +18,7 @@ import {
   listDividendPools,
   getDividendPool,
   cancelDividendPool,
+  verifySnapshotConsistency,
   CreatePoolSchema,
   ClaimSchema,
   ListPoolsSchema,
@@ -170,6 +172,23 @@ router.get("/claimable", async (req: Request, res: Response) => {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
     const status = message.includes("No snapshot") ? 404 : 500;
+    return res.status(status).json({ success: false, error: message });
+  }
+});
+
+// ─── GET /api/dividends/pools/:poolId/consistency (admin) ─────────────────
+
+/**
+ * Verify snapshot consistency for a pool (admin endpoint).
+ * Checks that holder snapshots sum to the expected total supply.
+ */
+router.get("/pools/:poolId/consistency", async (req: Request, res: Response) => {
+  try {
+    const result = await verifySnapshotConsistency(req.params.poolId);
+    return res.json({ success: true, data: result });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Unknown error";
+    const status = message.includes("not found") ? 404 : 500;
     return res.status(status).json({ success: false, error: message });
   }
 });

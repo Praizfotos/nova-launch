@@ -178,6 +178,18 @@ export const dbConnectionsIdle = new Gauge({
   registers: [register],
 });
 
+export const dbConnectionsWaiting = new Gauge({
+  name: "db_connections_waiting",
+  help: "Number of queries waiting to acquire a database connection",
+  registers: [register],
+});
+
+export const dbPoolSaturation = new Gauge({
+  name: "db_pool_saturation",
+  help: "Connection pool saturation ratio (active / max pool size)",
+  registers: [register],
+});
+
 // ---------------------------------------------------------------------------
 // Wallet Metrics
 // ---------------------------------------------------------------------------
@@ -339,6 +351,24 @@ export const webhookDeliveryDuration = new Histogram({
   help: "Duration of webhook delivery attempts in seconds",
   labelNames: ["status", "event_type"],
   buckets: [0.1, 0.5, 1, 2, 5, 10],
+  registers: [register],
+});
+
+/**
+ * End-to-end webhook delivery latency from event trigger to final outcome.
+ *
+ * Buckets chosen to capture fast (<500 ms) deliveries, typical retried
+ * deliveries (1–10 s with backoff), and worst-case exhausted retries (≥30 s).
+ *
+ * Labels:
+ *   outcome      – "success" | "failed" | "exhausted"
+ *   attempt_count – stringified number of attempts made (1-based)
+ */
+export const webhookDeliveryLatency = new Histogram({
+  name: "webhook_delivery_latency_seconds",
+  help: "End-to-end latency from event trigger to final delivery outcome in seconds",
+  labelNames: ["outcome", "attempt_count"],
+  buckets: [0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60],
   registers: [register],
 });
 
@@ -564,9 +594,16 @@ export class MetricsCollector {
     healthCheckDuration.observe({ service }, durationSeconds);
   }
 
-  static updateDatabaseConnections(active: number, idle: number): void {
+  static updateDatabaseConnections(
+    active: number,
+    idle: number,
+    waiting = 0,
+    maxPoolSize = 10
+  ): void {
     dbConnectionsActive.set(active);
     dbConnectionsIdle.set(idle);
+    dbConnectionsWaiting.set(waiting);
+    dbPoolSaturation.set(maxPoolSize > 0 ? active / maxPoolSize : 0);
   }
 
   static updateJobQueueSize(queueName: string, size: number): void {

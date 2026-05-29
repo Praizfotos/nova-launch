@@ -1,5 +1,5 @@
-import { useMemo, useState } from 'react';
-import type { AppError, DeploymentResult, DeploymentStatus, TokenDeployParams, TokenInfo } from '../types';
+import { useEffect, useMemo, useState } from 'react';
+import type { AppError, DeploymentResult, DeploymentStatus, TokenDeployParams, TokenInfo, WalletState } from '../types';
 import { ErrorCode } from '../types';
 import { createError, ErrorHandler, getErrorMessage } from '../utils/errors';
 import {
@@ -9,14 +9,10 @@ import {
 } from '../utils/validation';
 import { IPFSService, isValidIpfsUri } from '../services/IPFSService';
 import { StellarService } from '../services/stellar.service';
-import { TransactionHistoryStorage } from '../services/TransactionHistoryStorage';
-import { IPFSService } from '../services/IPFSService';
-import { StellarService } from '../services/stellar.service';
-import { TransactionHistoryStorage } from '../services/TransactionHistoryStorage';
+import { TransactionHistoryStorage, transactionHistoryStorage } from '../services/TransactionHistoryStorage';
 import { getDeploymentFeeBreakdown } from '../utils/feeCalculation';
 import { analytics, AnalyticsEvent } from '../services/analytics';
 import { useAnalytics } from './useAnalytics';
-import { transactionHistoryStorage } from '../services/TransactionHistoryStorage';
 
 const STATUS_MESSAGES: Record<DeploymentStatus, string> = {
     idle: '',
@@ -33,22 +29,48 @@ interface UseTokenDeployOptions {
     metadataFee?: number;
 }
 
-export function useTokenDeploy(network: 'testnet' | 'mainnet', options: UseTokenDeployOptions = {}) {
+export function useTokenDeploy(wallet: WalletState, options: UseTokenDeployOptions = {}) {
+    const { network, address } = wallet;
     const { maxRetries = 3, retryDelay = 2000, baseFee, metadataFee } = options;
     const [status, setStatus] = useState<DeploymentStatus>('idle');
     const [error, setError] = useState<AppError | null>(null);
     const [retryCount, setRetryCount] = useState(0);
     const [lastParams, setLastParams] = useState<TokenDeployParams | null>(null);
+    const [uploadedMetadataUri, setUploadedMetadataUri] = useState<string | null>(null);
 
     const stellarService = useMemo(() => new StellarService(network), [network]);
     const ipfsService = useMemo(() => new IPFSService(), []);
     const { trackTokenDeployed, trackTokenDeployFailed } = useAnalytics();
 
+    useEffect(() => {
+        if ((status === 'uploading' || status === 'deploying') && lastParams) {
+            if (address !== lastParams.adminWallet || !wallet.connected) {
+                const appError = createError(ErrorCode.WALLET_NOT_CONNECTED, 'Wallet disconnected or changed during deployment. Please try again.');
+                setError(appError);
+                setStatus('error');
+            }
+        } else if (status === 'error' && (!wallet.connected || address !== lastParams?.adminWallet)) {
+            // Reset if they change wallet after an error to avoid confusion
+            setStatus('idle');
+            setError(null);
+            setRetryCount(0);
+            setLastParams(null);
+        }
+    }, [wallet.connected, address, network, status, lastParams]);
+
     const deploy = async (params: TokenDeployParams): Promise<DeploymentResult> => {
         setError(null);
-        setStatus('idle');
+        // Only reset status if not already in a process or if it's a fresh start
+        if (status !== 'uploading' && status !== 'deploying') {
+            setStatus('idle');
+        }
         setLastParams(params);
-        setRetryCount(0);
+        
+        // If it's a new set of params (not a retry), reset retry count and uploaded URI
+        if (lastParams && (params.name !== lastParams.name || params.symbol !== lastParams.symbol)) {
+            setRetryCount(0);
+            setUploadedMetadataUri(null);
+        }
 
         if (!params.adminWallet) {
             const appError = createError(ErrorCode.WALLET_NOT_CONNECTED, 'Connect your wallet before deploying.');
@@ -83,8 +105,8 @@ export function useTokenDeploy(network: 'testnet' | 'mainnet', options: UseToken
             throw appError;
         }
 
-        let metadataUri = params.metadataUri;
-        if (params.metadata) {
+        let metadataUri = params.metadataUri || uploadedMetadataUri;
+        if (params.metadata && !metadataUri) {
             const imageValidation = isValidImageFile(params.metadata.image);
             if (!imageValidation.valid) {
                 const appError = createError(
@@ -116,6 +138,7 @@ export function useTokenDeploy(network: 'testnet' | 'mainnet', options: UseToken
                 if (!isValidIpfsUri(metadataUri)) {
                     throw new Error('IPFS upload returned an invalid URI');
                 }
+                setUploadedMetadataUri(metadataUri);
             } catch (uploadError) {
                 ErrorHandler.handle(uploadError instanceof Error ? uploadError : new Error(getErrorMessage(uploadError)), {
                     action: 'upload-metadata',

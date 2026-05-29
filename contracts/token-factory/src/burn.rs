@@ -42,6 +42,10 @@ pub fn burn(env: &Env, caller: Address, token_index: u32, amount: i128) -> Resul
     storage::increment_burn_count(env, token_index);
     storage::add_total_burned(env, token_index, amount);
 
+    // Record snapshots for historical queries
+    let _ = crate::snapshot::record_balance_snapshot(env, token_index, &caller, new_balance);
+    let _ = crate::snapshot::record_supply_snapshot(env, token_index, new_supply);
+
     emit_burn_event(env, token_index, &caller, amount, new_supply);
     Ok(())
 }
@@ -97,7 +101,18 @@ pub fn admin_burn(
     storage::increment_burn_count(env, token_index);
     storage::add_total_burned(env, token_index, amount);
 
+    // Record snapshots for historical queries
+    let _ = crate::snapshot::record_balance_snapshot(env, token_index, &holder, new_balance);
+    let _ = crate::snapshot::record_supply_snapshot(env, token_index, new_supply);
+
     emit_admin_burn_event(env, token_index, &admin, &holder, amount, new_supply);
+
+    // Emit dedicated clawback audit event for indexers (#1149)
+    // Event fires before/with state change, not after revert
+    if let Some(token_info) = storage::get_token_info(env, token_index) {
+        crate::events::emit_clawback_audit(env, &token_info.address, &admin, &holder, amount);
+    }
+
     Ok(())
 }
 

@@ -434,3 +434,56 @@ export async function expireStalepools(): Promise<number> {
   });
   return result.count;
 }
+
+export interface SnapshotConsistencyResult {
+  poolId: string;
+  isConsistent: boolean;
+  expectedTotal: string;
+  actualTotal: string;
+  tolerance: string;
+  holderCount: number;
+  inconsistentSnapshot?: string;
+}
+
+/**
+ * Verify that holder snapshots sum to the expected total supply.
+ * Uses a tolerance of 1 (smallest unit) for rounding differences.
+ */
+export async function verifySnapshotConsistency(
+  poolId: string
+): Promise<SnapshotConsistencyResult> {
+  const pool = await prisma.dividendPool.findUnique({
+    where: { id: poolId },
+  });
+  if (!pool) {
+    throw new Error(`Dividend pool not found: ${poolId}`);
+  }
+
+  const snapshots = await prisma.holderSnapshot.findMany({
+    where: { poolId },
+    select: { holder: true, balance: true },
+  });
+
+  let actualTotal = 0n;
+  for (const snapshot of snapshots) {
+    actualTotal += snapshot.balance;
+  }
+
+  const expectedTotal = pool.supplySnapshot;
+  const tolerance = 1n;
+  const difference =
+    actualTotal > expectedTotal
+      ? actualTotal - expectedTotal
+      : expectedTotal - actualTotal;
+  const isConsistent = difference <= tolerance;
+
+  return {
+    poolId,
+    isConsistent,
+    expectedTotal: expectedTotal.toString(),
+    actualTotal: actualTotal.toString(),
+    tolerance: tolerance.toString(),
+    holderCount: snapshots.length,
+    inconsistentSnapshot: isConsistent ? undefined : `Difference: ${difference.toString()}`,
+  };
+}

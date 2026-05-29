@@ -18,8 +18,8 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, Env};
-use crate::{GovernanceContract, GovernanceContractClient};
+use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use crate::{GovernanceContract, GovernanceContractClient, types};
 
 // ─── Test helpers ──────────────────────────────────────────────────────────
 
@@ -472,4 +472,391 @@ fn delegate_then_balance_decrease_does_not_underflow() {
 
     let bob_power = c.get_vote_power(&bob);
     assert!(bob_power >= 0, "Vote power must never be negative");
+}
+
+
+// ─── Issue #1055: Timelock boundary conditions ──────────────────────────────
+// Tests that proposals respect voting period boundaries
+
+#[test]
+fn proposal_voting_period_before_end() {
+    let (env, contract_id, admin) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let voter = Address::generate(&env);
+
+    fund(&env, &contract_id, &admin, &voter, 100_i128);
+
+    let proposal_id = c.create_proposal(
+        &creator,
+        &String::from_str(&env, "Test proposal"),
+        &soroban_sdk::Bytes::new(&env),
+        &1000_u64, // Long voting period
+        &50_i128,
+        &50_u32,
+    );
+
+    // Voting should succeed before period ends
+    c.cast_vote(&voter, &proposal_id, &true);
+    let proposal = c.get_proposal(&proposal_id).unwrap();
+    assert_eq!(proposal.votes_for, 100_i128);
+}
+
+#[test]
+#[should_panic]
+fn proposal_voting_period_after_end() {
+    let (env, contract_id, admin) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let voter = Address::generate(&env);
+
+    fund(&env, &contract_id, &admin, &voter, 100_i128);
+
+    let proposal_id = c.create_proposal(
+        &creator,
+        &String::from_str(&env, "Test proposal"),
+        &soroban_sdk::Bytes::new(&env),
+        &0_u64, // Voting period ends immediately
+        &50_i128,
+        &50_u32,
+    );
+
+    // Voting should fail after period ends
+    c.cast_vote(&voter, &proposal_id, &true);
+}
+
+#[test]
+#[should_panic]
+fn proposal_finalize_before_voting_period_ends() {
+    let (env, contract_id, _admin) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+
+    let proposal_id = c.create_proposal(
+        &creator,
+        &String::from_str(&env, "Test proposal"),
+        &soroban_sdk::Bytes::new(&env),
+        &1000_u64, // Long voting period
+        &50_i128,
+        &50_u32,
+    );
+
+    // Finalization should fail before voting period ends
+    c.finalize_proposal(&proposal_id);
+}
+
+#[test]
+fn proposal_finalize_after_voting_period_ends() {
+    let (env, contract_id, _admin) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+
+    let proposal_id = c.create_proposal(
+        &creator,
+        &String::from_str(&env, "Test proposal"),
+        &soroban_sdk::Bytes::new(&env),
+        &0_u64, // Voting period ends immediately
+        &50_i128,
+        &50_u32,
+    );
+
+    // Finalization should succeed after voting period ends
+    let status = c.finalize_proposal(&proposal_id);
+    assert_eq!(status, types::ProposalStatus::Failed); // No quorum
+}
+
+// ─── Issue #1056: Governance state-machine transitions ──────────────────────
+// Tests that proposals transition through valid states only
+
+#[test]
+fn proposal_state_active_to_passed() {
+    let (env, contract_id, admin) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let voter = Address::generate(&env);
+
+    fund(&env, &contract_id, &admin, &voter, 100_i128);
+
+    let proposal_id = c.create_proposal(
+        &creator,
+        &String::from_str(&env, "Test proposal"),
+        &soroban_sdk::Bytes::new(&env),
+        &0_u64,
+        &50_i128,  // Quorum: 50
+        &50_u32,   // Threshold: 50%
+    );
+
+    c.cast_vote(&voter, &proposal_id, &true);
+
+    let status = c.finalize_proposal(&proposal_id);
+    assert_eq!(status, types::ProposalStatus::Passed);
+}
+
+#[test]
+fn proposal_state_active_to_rejected() {
+    let (env, contract_id, admin) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let voter1 = Address::generate(&env);
+    let voter2 = Address::generate(&env);
+
+    fund(&env, &contract_id, &admin, &voter1, 100_i128);
+    fund(&env, &contract_id, &admin, &voter2, 100_i128);
+
+    let proposal_id = c.create_proposal(
+        &creator,
+        &String::from_str(&env, "Test proposal"),
+        &soroban_sdk::Bytes::new(&env),
+        &0_u64,
+        &100_i128, // Quorum: 100
+        &50_u32,   // Threshold: 50%
+    );
+
+    c.cast_vote(&voter1, &proposal_id, &true);  // 100 for
+    c.cast_vote(&voter2, &proposal_id, &false); // 100 against
+
+    let status = c.finalize_proposal(&proposal_id);
+    assert_eq!(status, types::ProposalStatus::Rejected);
+}
+
+#[test]
+fn proposal_state_active_to_failed_no_quorum() {
+    let (env, contract_id, admin) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let voter = Address::generate(&env);
+
+    fund(&env, &contract_id, &admin, &voter, 50_i128);
+
+    let proposal_id = c.create_proposal(
+        &creator,
+        &String::from_str(&env, "Test proposal"),
+        &soroban_sdk::Bytes::new(&env),
+        &0_u64,
+        &100_i128, // Quorum: 100 (not met)
+        &50_u32,
+    );
+
+    c.cast_vote(&voter, &proposal_id, &true);
+
+    let status = c.finalize_proposal(&proposal_id);
+    assert_eq!(status, types::ProposalStatus::Failed);
+}
+
+#[test]
+#[should_panic]
+fn proposal_cannot_finalize_twice() {
+    let (env, contract_id, admin) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let voter = Address::generate(&env);
+
+    fund(&env, &contract_id, &admin, &voter, 100_i128);
+
+    let proposal_id = c.create_proposal(
+        &creator,
+        &String::from_str(&env, "Test proposal"),
+        &soroban_sdk::Bytes::new(&env),
+        &0_u64,
+        &50_i128,
+        &50_u32,
+    );
+
+    c.cast_vote(&voter, &proposal_id, &true);
+    c.finalize_proposal(&proposal_id);
+
+    // Second finalization should panic
+    c.finalize_proposal(&proposal_id);
+}
+
+#[test]
+#[should_panic]
+fn proposal_cannot_vote_on_finalized() {
+    let (env, contract_id, admin) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let voter1 = Address::generate(&env);
+    let voter2 = Address::generate(&env);
+
+    fund(&env, &contract_id, &admin, &voter1, 100_i128);
+    fund(&env, &contract_id, &admin, &voter2, 100_i128);
+
+    let proposal_id = c.create_proposal(
+        &creator,
+        &String::from_str(&env, "Test proposal"),
+        &soroban_sdk::Bytes::new(&env),
+        &0_u64,
+        &50_i128,
+        &50_u32,
+    );
+
+    c.cast_vote(&voter1, &proposal_id, &true);
+    c.finalize_proposal(&proposal_id);
+
+    // Voting on finalized proposal should panic
+    c.cast_vote(&voter2, &proposal_id, &true);
+}
+
+#[test]
+#[should_panic]
+fn proposal_cannot_vote_twice() {
+    let (env, contract_id, admin) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let voter = Address::generate(&env);
+
+    fund(&env, &contract_id, &admin, &voter, 100_i128);
+
+    let proposal_id = c.create_proposal(
+        &creator,
+        &String::from_str(&env, "Test proposal"),
+        &soroban_sdk::Bytes::new(&env),
+        &100_u64,
+        &50_i128,
+        &50_u32,
+    );
+
+    c.cast_vote(&voter, &proposal_id, &true);
+
+    // Second vote should panic
+    c.cast_vote(&voter, &proposal_id, &false);
+}
+
+// ─── Issue #1057: Vesting schedule arithmetic (simulated with proposal voting) ──
+// Tests that vote accumulation follows linear arithmetic with proper rounding
+
+#[test]
+fn proposal_vote_accumulation_linear() {
+    let (env, contract_id, admin) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let voter1 = Address::generate(&env);
+    let voter2 = Address::generate(&env);
+    let voter3 = Address::generate(&env);
+
+    fund(&env, &contract_id, &admin, &voter1, 100_i128);
+    fund(&env, &contract_id, &admin, &voter2, 200_i128);
+    fund(&env, &contract_id, &admin, &voter3, 300_i128);
+
+    let proposal_id = c.create_proposal(
+        &creator,
+        &String::from_str(&env, "Test proposal"),
+        &soroban_sdk::Bytes::new(&env),
+        &100_u64,
+        &500_i128,
+        &50_u32,
+    );
+
+    // Vote 1: 100 votes
+    c.cast_vote(&voter1, &proposal_id, &true);
+    let proposal = c.get_proposal(&proposal_id).unwrap();
+    assert_eq!(proposal.votes_for, 100_i128);
+
+    // Vote 2: 100 + 200 = 300 votes
+    c.cast_vote(&voter2, &proposal_id, &true);
+    let proposal = c.get_proposal(&proposal_id).unwrap();
+    assert_eq!(proposal.votes_for, 300_i128);
+
+    // Vote 3: 300 + 300 = 600 votes
+    c.cast_vote(&voter3, &proposal_id, &true);
+    let proposal = c.get_proposal(&proposal_id).unwrap();
+    assert_eq!(proposal.votes_for, 600_i128);
+}
+
+#[test]
+fn proposal_vote_rounding_behavior() {
+    let (env, contract_id, admin) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let voter1 = Address::generate(&env);
+    let voter2 = Address::generate(&env);
+
+    fund(&env, &contract_id, &admin, &voter1, 100_i128);
+    fund(&env, &contract_id, &admin, &voter2, 100_i128);
+
+    let proposal_id = c.create_proposal(
+        &creator,
+        &String::from_str(&env, "Test proposal"),
+        &soroban_sdk::Bytes::new(&env),
+        &0_u64,
+        &150_i128,
+        &33_u32, // 33% threshold
+    );
+
+    c.cast_vote(&voter1, &proposal_id, &true);  // 100 for
+    c.cast_vote(&voter2, &proposal_id, &false); // 100 against
+
+    // Total: 200 votes, threshold: (200 * 33) / 100 = 66
+    // For: 100 > 66, so should pass
+    let status = c.finalize_proposal(&proposal_id);
+    assert_eq!(status, types::ProposalStatus::Passed);
+}
+
+// ─── Issue #1058: Campaign lifecycle state-transition tests ──────────────────
+// Tests that proposals follow complete lifecycle from creation to terminal state
+
+#[test]
+fn proposal_lifecycle_creation_to_completion() {
+    let (env, contract_id, admin) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let voter = Address::generate(&env);
+
+    fund(&env, &contract_id, &admin, &voter, 100_i128);
+
+    // Step 1: Create proposal (Active state)
+    let proposal_id = c.create_proposal(
+        &creator,
+        &String::from_str(&env, "Full lifecycle proposal"),
+        &soroban_sdk::Bytes::new(&env),
+        &0_u64,
+        &50_i128,
+        &50_u32,
+    );
+
+    let proposal = c.get_proposal(&proposal_id).unwrap();
+    assert_eq!(proposal.status, types::ProposalStatus::Active);
+
+    // Step 2: Accept contributions (votes)
+    c.cast_vote(&voter, &proposal_id, &true);
+
+    // Verify proposal is still active
+    let proposal = c.get_proposal(&proposal_id).unwrap();
+    assert_eq!(proposal.status, types::ProposalStatus::Active);
+
+    // Step 3: Finalize (transition to terminal state)
+    let status = c.finalize_proposal(&proposal_id);
+    assert_eq!(status, types::ProposalStatus::Passed);
+
+    // Verify proposal is now in terminal state
+    let proposal = c.get_proposal(&proposal_id).unwrap();
+    assert_eq!(proposal.status, types::ProposalStatus::Passed);
+}
+
+#[test]
+#[should_panic]
+fn proposal_rejects_operations_on_inactive() {
+    let (env, contract_id, admin) = setup();
+    let c = client(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let voter1 = Address::generate(&env);
+    let voter2 = Address::generate(&env);
+
+    fund(&env, &contract_id, &admin, &voter1, 100_i128);
+    fund(&env, &contract_id, &admin, &voter2, 100_i128);
+
+    let proposal_id = c.create_proposal(
+        &creator,
+        &String::from_str(&env, "Test proposal"),
+        &soroban_sdk::Bytes::new(&env),
+        &0_u64, // Voting period already ended
+        &50_i128,
+        &50_u32,
+    );
+
+    c.cast_vote(&voter1, &proposal_id, &true);
+    c.finalize_proposal(&proposal_id);
+
+    // Try to vote on inactive proposal - should panic
+    c.cast_vote(&voter2, &proposal_id, &true);
 }

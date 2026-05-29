@@ -285,6 +285,36 @@ pub fn emit_clawback_toggled(env: &Env, token_address: &Address, admin: &Address
     );
 }
 
+/// Emit clawback audit event (v1) - #1149
+///
+/// **Schema Version**: 1
+/// **Event Name**: clawb_au_v1
+///
+/// **Topics** (indexed):
+/// - Event name: "clawb_au_v1"
+/// - token_address: Address - The token contract address
+///
+/// **Payload** (non-indexed):
+/// - actor: Address - The admin who performed the clawback
+/// - target: Address - The address whose tokens were clawed back
+/// - amount: i128 - The amount of tokens clawed back
+///
+/// **Schema Stability**: This schema is immutable. Any changes require a new version.
+///
+/// Emitted when admin performs a clawback operation with full audit trail
+pub fn emit_clawback_audit(
+    env: &Env,
+    token_address: &Address,
+    actor: &Address,
+    target: &Address,
+    amount: i128,
+) {
+    env.events().publish(
+        (symbol_short!("clawb_au_v1"), token_address.clone()),
+        (actor.clone(), target.clone(), amount),
+    );
+}
+
 /// Emit token burned event (v1)
 ///
 /// **Schema Version**: 1
@@ -676,6 +706,22 @@ pub fn emit_stream_cancelled(
     );
 }
 
+/// Emit stream dispute raised event
+pub fn emit_stream_dispute_raised(env: &Env, stream_id: u32, caller: &Address) {
+    env.events().publish(
+        (symbol_short!("strm_disp"), stream_id),
+        (caller,),
+    );
+}
+
+/// Emit stream dispute resolved event
+pub fn emit_stream_dispute_resolved(env: &Env, stream_id: u32, admin: &Address) {
+    env.events().publish(
+        (symbol_short!("strm_rslv"), stream_id),
+        (admin,),
+    );
+}
+
 /// Emit stream metadata updated event (v1)
 /// 
 /// **Schema Version**: 1
@@ -770,6 +816,14 @@ pub fn emit_proposal_executed(
     );
 }
 
+/// Emit proposal cancelled event
+pub fn emit_proposal_cancelled(env: &Env, proposal_id: u64, cancelled_by: &Address) {
+    env.events().publish(
+        (symbol_short!("prop_cncl"), proposal_id),
+        (cancelled_by,),
+    );
+}
+
 /// Emit queue entry added event
 ///
 /// Published when a proposal is added to the priority execution queue.
@@ -796,6 +850,25 @@ pub fn emit_queue_entry_removed(
     env.events().publish(
         (symbol_short!("q_rem"), proposal_id),
         (priority as u32,),
+    );
+}
+
+/// Emit enriched error detail event
+/// 
+/// **Event Name**: err_det
+/// 
+/// **Topics** (indexed):
+/// - Event name: "err_det"
+/// - error_code: u32 - Numerical representation of the error
+/// 
+/// **Payload** (non-indexed):
+/// - context: i128 - Additional context (e.g. token index, amount)
+/// 
+/// Emitted when a high-value data path fails to provide structured diagnostic data.
+pub fn emit_error_detail(env: &Env, error_code: u32, context: i128) {
+    env.events().publish(
+        (symbol_short!("err_det"), error_code),
+        (context,),
     );
 }
 
@@ -936,6 +1009,14 @@ pub fn emit_campaign_completed(env: &Env, campaign_id: u64, tokens_burned: i128,
     );
 }
 
+/// Emit campaign finalized event (admin/owner-triggered finalization)
+pub fn emit_campaign_finalized(env: &Env, campaign_id: u64, caller: &Address) {
+    env.events().publish(
+        (symbol_short!("cmp_fin"), campaign_id),
+        (caller,),
+    );
+}
+
 /// Emit campaign cancelled event
 ///
 /// **Event Name**: cmp_cnl
@@ -1055,4 +1136,148 @@ pub fn emit_referral_registered(env: &Env, referee: &Address, referrer: &Address
 pub fn emit_commission_paid(env: &Env, referrer: &Address, token_index: u32, amount: i128) {
     env.events()
         .publish((symbol_short!("com_paid"),), (referrer, token_index, amount));
+}
+
+/// Emit role granted event (v1)
+///
+/// **Schema Version**: 1
+/// **Event Name**: role_gr_v1
+///
+/// **Topics** (indexed):
+/// - Event name: "role_gr_v1"
+/// - token_index: u32 - The token this role applies to
+///
+/// **Payload** (non-indexed):
+/// - creator: Address - The token creator granting the role
+/// - grantee: Address - The address receiving the role
+/// - role: Role - The role being granted
+///
+/// **Schema Stability**: This schema is immutable. Any changes require a new version.
+pub fn emit_role_granted(
+    env: &Env,
+    token_index: u32,
+    creator: &Address,
+    grantee: &Address,
+    role: crate::types::Role,
+) {
+    env.events().publish(
+        (symbol_short!("role_gr_v1"), token_index),
+        (creator.clone(), grantee.clone(), role),
+    );
+}
+
+/// Emit role revoked event (v1)
+///
+/// **Schema Version**: 1
+/// **Event Name**: role_rv_v1
+///
+/// **Topics** (indexed):
+/// - Event name: "role_rv_v1"
+/// - token_index: u32 - The token this role applies to
+///
+/// **Payload** (non-indexed):
+/// - creator: Address - The token creator revoking the role
+/// - revokee: Address - The address losing the role
+/// - role: Role - The role being revoked
+///
+/// **Schema Stability**: This schema is immutable. Any changes require a new version.
+pub fn emit_role_revoked(
+    env: &Env,
+    token_index: u32,
+    creator: &Address,
+    revokee: &Address,
+    role: crate::types::Role,
+) {
+    env.events().publish(
+        (symbol_short!("role_rv_v1"), token_index),
+        (creator.clone(), revokee.clone(), role),
+    );
+}
+
+/// Emit commission rate updated event (v1)
+///
+/// **Schema Version**: 1
+/// **Event Name**: com_rt_v1
+///
+/// **Topics** (indexed):
+/// - Event name: "com_rt_v1"
+///
+/// **Payload** (non-indexed):
+/// - admin: Address - The admin who updated the rate
+/// - rate_bps: u32 - New commission rate in basis points
+///
+/// **Schema Stability**: This schema is immutable. Any changes require a new version.
+pub fn emit_commission_rate_updated(env: &Env, admin: &Address, rate_bps: u32) {
+    env.events()
+        .publish((symbol_short!("com_rt_v1"),), (admin.clone(), rate_bps));
+}
+
+/// Emit treasury policy initialized event (v1)
+///
+/// **Schema Version**: 1
+/// **Event Name**: trs_ini_v1
+///
+/// **Topics** (indexed):
+/// - Event name: "trs_ini_v1"
+///
+/// **Payload** (non-indexed):
+/// - daily_cap: i128 - The daily withdrawal cap in stroops
+/// - allowlist_enabled: bool - Whether the allowlist is active
+///
+/// **Schema Stability**: This schema is immutable. Any changes require a new version.
+pub fn emit_treasury_policy_initialized(env: &Env, daily_cap: i128, allowlist_enabled: bool) {
+    env.events()
+        .publish((symbol_short!("trs_ini_v1"),), (daily_cap, allowlist_enabled));
+}
+
+/// Emit dynamic quorum configured event (v1)
+///
+/// **Schema Version**: 1
+/// **Event Name**: dq_cfg_v1
+///
+/// **Topics** (indexed):
+/// - Event name: "dq_cfg_v1"
+///
+/// **Payload** (non-indexed):
+/// - admin: Address - The admin who configured dynamic quorum
+/// - enabled: bool - Whether dynamic quorum is enabled
+/// - min_quorum_percent: u32 - Minimum quorum floor
+/// - max_quorum_percent: u32 - Maximum quorum ceiling
+///
+/// **Schema Stability**: This schema is immutable. Any changes require a new version.
+pub fn emit_dynamic_quorum_configured(
+    env: &Env,
+    admin: &Address,
+    enabled: bool,
+    min_quorum_percent: u32,
+    max_quorum_percent: u32,
+) {
+    env.events().publish(
+        (symbol_short!("dq_cfg_v1"),),
+        (admin.clone(), enabled, min_quorum_percent, max_quorum_percent),
+    );
+}
+
+/// Emit admin transfer cancelled event
+pub fn emit_admin_cancelled(env: &Env, admin: &Address, cancelled_pending: &Address) {
+    env.events()
+        .publish((symbol_short!("adm_cxl"),), (admin.clone(), cancelled_pending.clone()));
+}
+
+/// Emit trusted caller registered event
+pub fn emit_trusted_caller_added(env: &Env, admin: &Address, caller: &Address) {
+    env.events()
+        .publish((symbol_short!("tc_add"),), (admin.clone(), caller.clone()));
+}
+
+/// Emit trusted caller revoked event
+pub fn emit_trusted_caller_removed(env: &Env, admin: &Address, caller: &Address) {
+    env.events()
+        .publish((symbol_short!("tc_rem"),), (admin.clone(), caller.clone()));
+}
+
+/// Emit authorized cross-contract call event
+pub fn emit_cross_contract_call(env: &Env, caller: &Address) {
+    env.events()
+        .publish((symbol_short!("cc_auth"),), (caller.clone(),));
 }

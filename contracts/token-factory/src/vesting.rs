@@ -305,7 +305,7 @@ mod vesting_test {
             prop_assume!(cliff <= duration);
             prop_assume!(offset < cliff);
             let v = calculate_vested_amount(grant, start, cliff, duration, start + offset).unwrap();
-            prop_assert_eq!(v, 0, "cliff not enforced: vested={v} at offset={offset} < cliff={cliff}");
+            prop_assert_eq!(v, 0);
         }
     }
 }

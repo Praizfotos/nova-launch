@@ -8,10 +8,20 @@ export interface DomainEvent {
   metadata?: Record<string, any>;
 }
 
+export interface AggregateSnapshot {
+  id: string;
+  aggregateId: string;
+  version: number;
+  state: Record<string, any>;
+  timestamp: number;
+}
+
 export interface EventStore {
   append(event: DomainEvent): Promise<void>;
   getEvents(aggregateId: string, fromVersion?: number): Promise<DomainEvent[]>;
   getAllEvents(fromTimestamp?: number): Promise<DomainEvent[]>;
+  saveSnapshot(snapshot: AggregateSnapshot): Promise<void>;
+  getLatestSnapshot(aggregateId: string): Promise<AggregateSnapshot | null>;
 }
 
 export interface AuditTrail {
@@ -26,6 +36,7 @@ export interface AuditTrail {
 export class InMemoryEventStore implements EventStore {
   private events: Map<string, DomainEvent[]> = new Map();
   private allEvents: DomainEvent[] = [];
+  private snapshots: Map<string, AggregateSnapshot[]> = new Map();
 
   async append(event: DomainEvent): Promise<void> {
     if (!this.events.has(event.aggregateId)) {
@@ -49,22 +60,38 @@ export class InMemoryEventStore implements EventStore {
     if (!fromTimestamp) return this.allEvents;
     return this.allEvents.filter(e => e.timestamp >= fromTimestamp);
   }
+
+  async saveSnapshot(snapshot: AggregateSnapshot): Promise<void> {
+    if (!this.snapshots.has(snapshot.aggregateId)) {
+      this.snapshots.set(snapshot.aggregateId, []);
+    }
+    this.snapshots.get(snapshot.aggregateId)!.push(snapshot);
+  }
+
+  async getLatestSnapshot(aggregateId: string): Promise<AggregateSnapshot | null> {
+    const snapshots = this.snapshots.get(aggregateId) || [];
+    if (snapshots.length === 0) return null;
+    return snapshots[snapshots.length - 1];
+  }
 }
 
 export class EventSourcingService {
   private eventStore: EventStore;
   private auditTrail: AuditTrail[] = [];
   private eventHandlers: Map<string, Function[]> = new Map();
+  private snapshotInterval: number;
 
-  constructor(eventStore?: EventStore) {
+  constructor(eventStore?: EventStore, snapshotInterval: number = 100) {
     this.eventStore = eventStore || new InMemoryEventStore();
+    this.snapshotInterval = snapshotInterval;
   }
 
   async publishEvent(
     aggregateId: string,
     eventType: string,
     data: Record<string, any>,
-    metadata?: Record<string, any>
+    metadata?: Record<string, any>,
+    stateReducer?: (state: Record<string, any>, event: DomainEvent) => Record<string, any>
   ): Promise<void> {
     const event: DomainEvent = {
       id: this.generateEventId(),
@@ -79,10 +106,51 @@ export class EventSourcingService {
     await this.eventStore.append(event);
     this.recordAuditTrail(event);
     await this.handleEvent(event);
+
+    // Auto-snapshot every N events
+    if (event.version % this.snapshotInterval === 0 && stateReducer) {
+      const state = await this.rebuildStateFromSnapshot(aggregateId, stateReducer);
+      await this.createSnapshot(aggregateId, state);
+    }
   }
 
   async getAggregateHistory(aggregateId: string): Promise<DomainEvent[]> {
     return this.eventStore.getEvents(aggregateId);
+  }
+
+  async rebuildStateFromSnapshot(
+    aggregateId: string,
+    stateReducer: (state: Record<string, any>, event: DomainEvent) => Record<string, any>
+  ): Promise<Record<string, any>> {
+    const snapshot = await this.eventStore.getLatestSnapshot(aggregateId);
+    let state = snapshot?.state || {};
+    const fromVersion = snapshot ? snapshot.version + 1 : 1;
+
+    const events = await this.eventStore.getEvents(aggregateId, fromVersion);
+    for (const event of events) {
+      state = stateReducer(state, event);
+    }
+
+    return state;
+  }
+
+  async createSnapshot(
+    aggregateId: string,
+    state: Record<string, any>
+  ): Promise<AggregateSnapshot> {
+    const events = await this.eventStore.getEvents(aggregateId);
+    const version = events.length > 0 ? events[events.length - 1].version : 0;
+
+    const snapshot: AggregateSnapshot = {
+      id: `snap_${aggregateId}_${version}_${Date.now()}`,
+      aggregateId,
+      version,
+      state,
+      timestamp: Date.now(),
+    };
+
+    await this.eventStore.saveSnapshot(snapshot);
+    return snapshot;
   }
 
   async getAuditTrail(

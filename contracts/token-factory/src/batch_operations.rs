@@ -443,4 +443,30 @@ mod tests {
         let indices = client.batch_reveal(&admin, &tokens, &10_000_000_i128).unwrap();
         assert_eq!(indices.len(), 10);
     }
+
+    #[test]
+    fn batch_reveal_partial_failure_leaves_no_state() {
+        // A bad token in the middle must roll back the entire batch.
+        let (env, contract_id, admin, _treasury) = setup();
+        let client = crate::TokenFactoryClient::new(&env, &contract_id);
+
+        let bad = TokenCreationParams {
+            name: String::from_str(&env, ""),   // invalid: empty name
+            symbol: String::from_str(&env, "BAD"),
+            decimals: 7,
+            initial_supply: 1_000_000,
+            max_supply: None,
+            metadata_uri: None,
+        };
+        let tokens = vec![
+            &env,
+            make_params(&env, "Good1", "GD1"),
+            bad,
+            make_params(&env, "Good2", "GD2"),
+        ];
+        let err = client.batch_reveal(&admin, &tokens, &3_000_000_i128).unwrap_err();
+        assert_eq!(err, crate::types::Error::InvalidTokenParams.into());
+        // No token should have been created.
+        assert!(client.get_token_info(&0_u32).is_err());
+    }
 }

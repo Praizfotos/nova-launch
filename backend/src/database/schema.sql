@@ -42,3 +42,23 @@ CREATE TABLE IF NOT EXISTS webhook_rate_limits (
     window_start TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT positive_count CHECK (request_count >= 0)
 );
+
+-- Dead-letter store for failed webhook deliveries
+CREATE TABLE IF NOT EXISTS webhook_dead_letters (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    subscription_id UUID NOT NULL REFERENCES webhook_subscriptions(id) ON DELETE CASCADE,
+    event VARCHAR(50) NOT NULL,
+    payload JSONB NOT NULL,
+    status_code INTEGER,
+    last_error TEXT,
+    attempt_count INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    resolved_at TIMESTAMP,
+    resolution VARCHAR(50)
+);
+
+-- Indexes for dead-letter queries
+CREATE INDEX IF NOT EXISTS idx_dead_letters_subscription ON webhook_dead_letters(subscription_id);
+CREATE INDEX IF NOT EXISTS idx_dead_letters_created_at ON webhook_dead_letters(created_at);
+CREATE INDEX IF NOT EXISTS idx_dead_letters_resolved ON webhook_dead_letters(resolved_at);

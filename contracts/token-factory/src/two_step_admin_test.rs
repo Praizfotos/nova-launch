@@ -403,4 +403,54 @@ mod two_step_admin_tests {
         let events = env.events().all();
         assert!(!events.is_empty());
     }
+
+    // ═══════════════════════════════════════════════════════
+    //  Cancel Admin Tests (#1141)
+    // ═══════════════════════════════════════════════════════
+
+    #[test]
+    fn test_cancel_admin_clears_pending() {
+        let (_env, client, admin, _treasury) = setup();
+        let new_admin = Address::generate(&_env);
+
+        client.propose_admin(&admin, &new_admin).unwrap();
+        client.cancel_admin(&admin).unwrap();
+
+        // After cancel, accept should fail (no pending admin)
+        let result = client.try_accept_admin(&new_admin);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cancel_admin_unauthorized() {
+        let (_env, client, admin, _treasury) = setup();
+        let new_admin = Address::generate(&_env);
+        let unauthorized = Address::generate(&_env);
+
+        client.propose_admin(&admin, &new_admin).unwrap();
+
+        let result = client.try_cancel_admin(&unauthorized);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cancel_admin_no_pending_fails() {
+        let (_env, client, admin, _treasury) = setup();
+
+        // No pending admin — cancel should return InvalidParameters
+        let result = client.try_cancel_admin(&admin);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cancel_admin_emits_event() {
+        let (env, client, admin, _treasury) = setup();
+        let new_admin = Address::generate(&env);
+
+        client.propose_admin(&admin, &new_admin).unwrap();
+        client.cancel_admin(&admin).unwrap();
+
+        let events = env.events().all();
+        assert!(!events.is_empty());
+    }
 }

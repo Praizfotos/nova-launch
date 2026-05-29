@@ -213,6 +213,56 @@ export class CampaignProjectionService {
       pausedAt: campaign.pausedAt,
     };
   }
+
+  async recordStateTransition(
+    campaignId: string,
+    fromStatus: string,
+    toStatus: string,
+    actor: string,
+    txHash?: string
+  ): Promise<void> {
+    await prisma.campaignAuditTrail.create({
+      data: {
+        campaignId,
+        fromStatus: fromStatus as any,
+        toStatus: toStatus as any,
+        actor,
+        txHash: txHash || null,
+      },
+    });
+  }
+
+  async getAuditTrail(
+    campaignId: string,
+    limit = 50,
+    offset = 0
+  ): Promise<{
+    data: any[];
+    pagination: { limit: number; offset: number; total: number };
+  }> {
+    const [total, transitions] = await Promise.all([
+      prisma.campaignAuditTrail.count({ where: { campaignId } }),
+      prisma.campaignAuditTrail.findMany({
+        where: { campaignId },
+        orderBy: { transitionAt: "desc" },
+        skip: offset,
+        take: limit,
+      }),
+    ]);
+
+    return {
+      data: transitions.map((t) => ({
+        id: t.id,
+        campaignId: t.campaignId,
+        fromStatus: t.fromStatus,
+        toStatus: t.toStatus,
+        actor: t.actor,
+        txHash: t.txHash,
+        transitionAt: t.transitionAt.toISOString(),
+      })),
+      pagination: { limit, offset, total },
+    };
+  }
 }
 
 export const campaignProjectionService = new CampaignProjectionService();
